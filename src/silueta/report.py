@@ -78,7 +78,8 @@ def _shape(col: dict[str, Any]) -> str:
         parts.append("`" + col["masks"][0]["mask"] + "`")
     if col.get("semantic"):
         top = col["semantic"][0]
-        parts.append(f"{top['type']} {top['match_rate']:.0%}")
+        rate = f" {top['match_rate']:.0%}" if top.get("match_rate") is not None else " (name+shape)"
+        parts.append(f"{top['type']}{rate}")
     numeric = col.get("numeric")
     if numeric:
         lo, hi = numeric["magnitude_range"]

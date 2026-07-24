@@ -12,7 +12,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-HIGH_SEVERITY = {"us_ssn", "credit_card", "us_healthcare_npi"}
+HIGH_SEVERITY = {"us_ssn", "credit_card", "us_healthcare_npi", "us_dea_number", "mrn_like"}
 
 _PATTERNS: dict[str, re.Pattern[str]] = {
     "email": re.compile(r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$"),
@@ -22,9 +22,15 @@ _PATTERNS: dict[str, re.Pattern[str]] = {
     "us_phone": re.compile(r"(\+?1[\s.-]?)?(\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}$"),
     "ipv4": re.compile(r"((25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(25[0-5]|2[0-4]\d|1?\d?\d)$"),
     "iso_date": re.compile(r"\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?$"),
+    "us_date": re.compile(r"(0?[1-9]|1[0-2])[/-](0?[1-9]|[12]\d|3[01])[/-](\d{4}|\d{2})$"),
+    # Structural shape only: real ICD-10 validation needs the CMS code list
+    # (public domain, ~70k codes) — tracked as an optional data pack. The
+    # first letter is restricted to valid chapters to cut false positives.
+    "icd10_shape": re.compile(r"[A-TV-Z]\d[0-9A-Z](\.[0-9A-Z]{1,4})?$"),
 }
 
 _SSN = re.compile(r"(\d{3})-?(\d{2})-?(\d{4})$")
+_DEA = re.compile(r"([A-Za-z])([A-Za-z9])(\d{7})$")
 
 
 def luhn_valid(digits: str) -> bool:
@@ -63,11 +69,56 @@ def is_npi(value: str) -> bool:
     return luhn_valid("80840" + value)
 
 
+def is_dea(value: str) -> bool:
+    """DEA number: two letters + 7 digits; check digit is the ones digit of
+    (d1+d3+d5) + 2*(d2+d4+d6)."""
+    m = _DEA.fullmatch(value)
+    if not m:
+        return False
+    d = [int(ch) for ch in m.group(3)]
+    check = (d[0] + d[2] + d[4]) + 2 * (d[1] + d[3] + d[5])
+    return check % 10 == d[6]
+
+
 _CHECKS = {
     "us_ssn": is_plausible_ssn,
     "credit_card": is_credit_card,
     "us_healthcare_npi": is_npi,
+    "us_dea_number": is_dea,
 }
+
+# Tier-1: column-name token signals. Cheap, touches no data, and catches what
+# value shapes cannot (an MRN has no national format — the name is the signal).
+_NAME_SIGNALS: list[tuple[str, re.Pattern[str]]] = [
+    ("us_ssn", re.compile(r"\bssn\b|social.?security", re.IGNORECASE)),
+    ("mrn_like", re.compile(r"\bmrn\b|med(ical)?.?rec(ord)?.?(num|no|nbr|#)?", re.IGNORECASE)),
+    ("dob", re.compile(r"\bdob\b|date.?of.?birth|birth.?date", re.IGNORECASE)),
+    ("us_healthcare_npi", re.compile(r"\bnpi\b", re.IGNORECASE)),
+    ("us_dea_number", re.compile(r"\bdea\b", re.IGNORECASE)),
+    ("us_zip", re.compile(r"\bzip\b|postal.?code", re.IGNORECASE)),
+    ("us_phone", re.compile(r"\bphone\b|\bfax\b|\bmobile\b|\btel\b", re.IGNORECASE)),
+    ("email", re.compile(r"\be?mail\b", re.IGNORECASE)),
+    ("person_name", re.compile(r"(first|last|full|patient|member|middle).?name", re.IGNORECASE)),
+]
+
+
+def name_signals(column_name: str) -> list[str]:
+    return [semantic for semantic, pattern in _NAME_SIGNALS if pattern.search(column_name)]
+
+
+def mrn_heuristic(column_name: str, uniqueness_ratio: float | None, masks: list[dict]) -> bool:
+    """MRNs have no national format: flag when the NAME says medical-record
+    and the SHAPE behaves like an identifier (near-unique, one dominant
+    digit-heavy mask)."""
+    if "mrn_like" not in name_signals(column_name):
+        return False
+    if uniqueness_ratio is None or uniqueness_ratio < 0.9:
+        return False
+    if masks:
+        top = masks[0]["mask"]
+        digits = sum(1 for ch in top if ch == "9")
+        return digits >= max(4, len(top) // 2) or top.startswith(("AAA-", "A9"))
+    return True
 
 
 @dataclass
