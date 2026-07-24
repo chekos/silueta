@@ -46,6 +46,10 @@ uv tool install silueta
 pipx install silueta
 ```
 
+## Agent setup
+
+silueta is built for agent-driven data work: the profile is the interface an agent reads, and the repo ships a [Claude Code skill](skills/silueta/SKILL.md) plus a [lockdown recipe](docs/agent-lockdown.md) that blocks raw data reads (Read-tool denies + a shell hook) while allowlisting the profiler — the agent models data it is never allowed to read.
+
 ## License
 
 MIT
