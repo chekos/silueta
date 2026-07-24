@@ -49,6 +49,17 @@ def render_markdown(profile: dict[str, Any]) -> str:
         if alerts or col_alerts:
             lines.append("**Alerts:** " + "; ".join(col_alerts))
             lines.append("")
+    relations = profile.get("relations")
+    if relations:
+        lines.append("## Join candidates")
+        lines.append("")
+        for rel in relations:
+            lines.append(
+                f"- `{rel['from_table']}.{rel['from_column']}` → "
+                f"`{rel['to_table']}.{rel['to_column']}` "
+                f"(containment {rel['containment']:.0%}, name match {rel['name_similarity']:.0%})"
+            )
+        lines.append("")
     return "\n".join(lines)
 
 

@@ -107,26 +107,32 @@ def profile_table(
 
 def profile_workbook(
     conn: duckdb.DuckDBPyConnection, path: Path, k: int = DEFAULT_K
-) -> list[dict[str, Any]]:
-    """Profile every sheet of a workbook via messy-table recovery."""
+) -> list[tuple[dict[str, Any], str | None]]:
+    """Profile every sheet of a workbook via messy-table recovery.
+
+    Returns (table_dict, view_sql) pairs; view_sql reproduces the typed view
+    on this connection (the raw sheet temp tables persist for the run)."""
     from .workbook import extract_tables, register_table
 
-    tables: list[dict[str, Any]] = []
+    tables: list[tuple[dict[str, Any], str | None]] = []
     for i, sheet in enumerate(extract_tables(path)):
         name = f"{path.stem}/{sheet.sheet_name}"
         if sheet.not_tabular:
             tables.append(
-                {
-                    "name": name,
-                    "source": path.name,
-                    "rows": 0,
-                    "columns": [],
-                    "not_tabular": True,
-                    "alerts": [{"kind": "not_tabular", "detail": sheet.recovery.get("reason", "")}],
-                }
+                (
+                    {
+                        "name": name,
+                        "source": path.name,
+                        "rows": 0,
+                        "columns": [],
+                        "not_tabular": True,
+                        "alerts": [{"kind": "not_tabular", "detail": sheet.recovery.get("reason", "")}],
+                    },
+                    None,
+                )
             )
             continue
-        raw = f"_silueta_sheet_{i}"
+        raw = f"_silueta_sheet_{path.stem}_{i}"
         register_table(conn, sheet, raw)
         typed_sql, recovered = _recover_types(conn, raw)
         conn.execute(f"CREATE OR REPLACE TEMP VIEW t AS {typed_sql}")
@@ -138,7 +144,7 @@ def profile_workbook(
                 col["type_recovered"] = recovered[col["name"]]
                 if "typed_as_text_numeric" not in col.get("alerts", []):
                     col.setdefault("alerts", []).append("recovered_from_text")
-        tables.append(table)
+        tables.append((table, typed_sql))
     return tables
 
 
@@ -326,9 +332,21 @@ def profile_paths(paths: list[Path], k: int = DEFAULT_K) -> dict[str, Any]:
         },
         "tables": [],
     }
+    view_sqls: dict[str, str] = {}
     for path in paths:
         if path.suffix.lower() in (".xlsx", ".xls"):
-            profile["tables"].extend(profile_workbook(conn, path, k))
+            for table, view_sql in profile_workbook(conn, path, k):
+                profile["tables"].append(table)
+                if view_sql:
+                    view_sqls[table["name"]] = view_sql
         else:
-            profile["tables"].append(profile_table(conn, path, k))
+            table = profile_table(conn, path, k)
+            profile["tables"].append(table)
+            view_sqls[table["name"]] = f"SELECT * FROM {_reader_sql(path)}"
+
+    from .relations import detect_relations
+
+    relations = detect_relations(conn, profile["tables"], view_sqls)
+    if relations:
+        profile["relations"] = relations
     return profile
