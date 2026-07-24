@@ -65,6 +65,36 @@ def diff(
 
 
 @app.command()
+def emit(
+    target: str = typer.Argument(..., help="What to generate: 'dbt' or 'snowflake'"),
+    profile_path: Path = typer.Argument(..., exists=True, readable=True, help="A silueta profile.json"),
+    out_dir: Path = typer.Option(Path("silueta_out"), "--out-dir", "-d", help="Directory for generated files"),
+    source_name: str = typer.Option("vendor", "--source-name", help="dbt source name / Snowflake schema"),
+) -> None:
+    """Generate dbt sources+staging or Snowflake landing DDL from a profile."""
+    from .emit import emit_dbt_sources, emit_dbt_staging, emit_snowflake, table_key
+
+    profile = json.loads(profile_path.read_text())
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if target == "dbt":
+        (out_dir / "sources.yml").write_text(emit_dbt_sources(profile, source_name) + "\n")
+        typer.echo(f"wrote {out_dir / 'sources.yml'}")
+        for table in profile.get("tables", []):
+            if table.get("not_tabular") or table.get("suppressed_small_table"):
+                continue
+            path = out_dir / f"stg_{table_key(table)}.sql"
+            path.write_text(emit_dbt_staging(table, source_name))
+            typer.echo(f"wrote {path}")
+    elif target == "snowflake":
+        path = out_dir / "landing.sql"
+        path.write_text(emit_snowflake(profile, schema=source_name.upper()) + "\n")
+        typer.echo(f"wrote {path}")
+    else:
+        typer.echo(f"unknown emit target: {target} (expected 'dbt' or 'snowflake')", err=True)
+        raise typer.Exit(1)
+
+
+@app.command()
 def version() -> None:
     """Print the silueta version."""
     typer.echo(__version__)
