@@ -1,6 +1,6 @@
 [project]
 name = "silueta"
-version = "0.0.1"
+version = "0.1.0"
 description = "Profile the shape of your data — never the values. A privacy-preserving data profiler so agents can model datasets they are never allowed to read."
 readme = "README.md"
 license = "MIT"
