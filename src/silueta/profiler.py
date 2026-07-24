@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,9 @@ import duckdb
 from . import __version__
 from .contract import CONTRACT_STATEMENT, DEFAULT_K, small_table, suppress_mask_counts
 from .masks import mask_sql
-from .semantic import HIGH_SEVERITY, classify_sample
+from .semantic import HIGH_SEVERITY, classify_sample, mrn_heuristic, name_signals
+
+_CODE_NAME = re.compile(r"zip|postal|phone|ssn|npi|dea|mrn|code|(^|[_\s])id([_\s]|$)|acct|account", re.IGNORECASE)
 
 SAMPLE_SIZE = 1000
 NUMERIC_TYPES = ("TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "FLOAT", "DOUBLE", "DECIMAL")
@@ -197,25 +200,59 @@ def _profile_column(
     col["distinct"] = distinct
     col["uniqueness_ratio"] = round(distinct / nonnull, 4) if nonnull else 0.0
 
+    signals = name_signals(name)
+    if signals:
+        col["name_signals"] = signals
+
     if base_type in NUMERIC_TYPES:
         col["numeric"] = _numeric_facts(conn, q, base_type, ctype)
+        if base_type not in ("FLOAT", "DOUBLE", "DECIMAL") and (signals or _CODE_NAME.search(name)):
+            _int_code_facts(conn, q, col, k, signals)
     elif base_type in TEMPORAL_TYPES:
         col["temporal"] = _temporal_facts(conn, q)
     elif base_type == "VARCHAR":
         col.update(_string_facts(conn, q, k))
-        sample = [
-            row[0]
-            for row in conn.execute(
-                f"SELECT {q} FROM (SELECT {q} FROM t WHERE {q} IS NOT NULL) "
-                f"USING SAMPLE reservoir({SAMPLE_SIZE} ROWS)"
-            ).fetchall()
-        ]
-        semantic = classify_sample([str(v) for v in sample])
-        if semantic:
-            col["semantic"] = [vars(h) for h in semantic]
+        col.setdefault("semantic", []).extend(_sample_semantic(conn, q))
+
+    if mrn_heuristic(name, col.get("uniqueness_ratio"), col.get("masks", [])):
+        col.setdefault("semantic", []).append(
+            {"type": "mrn_like", "match_rate": None, "severity": "high", "basis": "name+shape"}
+        )
+    if col.get("semantic") == []:
+        del col["semantic"]
 
     _column_alerts(col)
     return col
+
+
+def _sample_semantic(conn: duckdb.DuckDBPyConnection, expr: str) -> list[dict[str, Any]]:
+    """Sample non-null values and classify in-process; only aggregates return."""
+    sample = [
+        row[0]
+        for row in conn.execute(
+            f"SELECT v FROM (SELECT {expr} AS v FROM t WHERE {expr} IS NOT NULL) "
+            f"USING SAMPLE reservoir({SAMPLE_SIZE} ROWS)"
+        ).fetchall()
+    ]
+    return [{**vars(h), "basis": "values"} for h in classify_sample([str(v) for v in sample])]
+
+
+def _int_code_facts(
+    conn: duckdb.DuckDBPyConnection, q: str, col: dict[str, Any], k: int, signals: list[str]
+) -> None:
+    """Integer columns named like codes/ids get string-form shape analysis:
+    zips, phones, and identifiers sniffed as numbers lose their shape otherwise."""
+    cast = f"CAST({q} AS VARCHAR)"
+    masks, suppressed_share = _mask_facts(conn, cast, k)
+    if masks:
+        col["masks"] = masks
+        if suppressed_share:
+            col["masks_suppressed_share"] = suppressed_share
+    col.setdefault("semantic", []).extend(_sample_semantic(conn, cast))
+    if "us_zip" in signals:
+        lo = conn.execute(f"SELECT min({q}) FROM t").fetchone()[0]
+        if lo is not None and lo < 10000:
+            col.setdefault("alerts", []).append("possible_leading_zero_loss")
 
 
 def _numeric_facts(
@@ -269,11 +306,7 @@ def _string_facts(conn: duckdb.DuckDBPyConnection, q: str, k: int) -> dict[str, 
         "non_ascii_rate": round((nonascii_ct or 0) / nonnull, 4) if nonnull else 0.0,
     }
 
-    mask_counts = conn.execute(
-        f"SELECT {mask_sql(q)} AS mask, count(*) AS n FROM t WHERE {q} IS NOT NULL "
-        f"GROUP BY 1 ORDER BY 2 DESC"
-    ).fetchall()
-    masks, suppressed_share = suppress_mask_counts(mask_counts, k)
+    masks, suppressed_share = _mask_facts(conn, q, k)
     facts["masks"] = masks
     if suppressed_share:
         facts["masks_suppressed_share"] = suppressed_share
@@ -293,6 +326,16 @@ def _string_facts(conn: duckdb.DuckDBPyConnection, q: str, k: int) -> dict[str, 
     return facts
 
 
+def _mask_facts(
+    conn: duckdb.DuckDBPyConnection, expr: str, k: int
+) -> tuple[list[dict[str, Any]], float]:
+    mask_counts = conn.execute(
+        f"SELECT {mask_sql(expr)} AS mask, count(*) AS n FROM t WHERE {expr} IS NOT NULL "
+        f"GROUP BY 1 ORDER BY 2 DESC"
+    ).fetchall()
+    return suppress_mask_counts(mask_counts, k)
+
+
 def _column_alerts(col: dict[str, Any]) -> None:
     alerts: list[str] = []
     if col.get("constant"):
@@ -310,8 +353,14 @@ def _column_alerts(col: dict[str, Any]) -> None:
     for hit in col.get("semantic", []):
         if hit["type"] in HIGH_SEVERITY:
             alerts.append(f"sensitive_{hit['type']}")
-    if alerts:
-        col["alerts"] = alerts
+    if "dob" in col.get("name_signals", []) and (
+        col.get("temporal") or col.get("castable", {}).get("as") == "date"
+    ):
+        alerts.append("sensitive_dob")
+    existing = col.get("alerts", [])
+    merged = existing + [a for a in alerts if a not in existing]
+    if merged:
+        col["alerts"] = merged
 
 
 def _table_alerts(table: dict[str, Any]) -> None:
