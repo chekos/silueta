@@ -383,15 +383,20 @@ def profile_paths(paths: list[Path], k: int = DEFAULT_K) -> dict[str, Any]:
     }
     view_sqls: dict[str, str] = {}
     for path in paths:
-        if path.suffix.lower() in (".xlsx", ".xls"):
-            for table, view_sql in profile_workbook(conn, path, k):
-                profile["tables"].append(table)
-                if view_sql:
-                    view_sqls[table["name"]] = view_sql
+        suffix = path.suffix.lower()
+        if suffix in (".xlsx", ".xls"):
+            pairs = profile_workbook(conn, path, k)
+        elif suffix in (".sqlite", ".sqlite3", ".db"):
+            from .database import profile_database
+
+            pairs = profile_database(conn, str(path), k)
         else:
             table = profile_table(conn, path, k)
+            pairs = [(table, f"SELECT * FROM {_reader_sql(path)}")]
+        for table, view_sql in pairs:
             profile["tables"].append(table)
-            view_sqls[table["name"]] = f"SELECT * FROM {_reader_sql(path)}"
+            if view_sql:
+                view_sqls[table["name"]] = view_sql
 
     from .relations import detect_relations
 

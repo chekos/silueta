@@ -39,6 +39,32 @@ def scan(
 
 
 @app.command()
+def diff(
+    old: Path = typer.Argument(..., exists=True, readable=True, help="Earlier profile.json"),
+    new: Path = typer.Argument(..., exists=True, readable=True, help="Later profile.json"),
+    out: Path | None = typer.Option(None, "--out", "-o", help="Write diff.json"),
+    report: Path | None = typer.Option(None, "--report", "-r", help="Write a Markdown diff report"),
+    fail_on_change: bool = typer.Option(False, "--fail-on-change", help="Exit 2 if anything changed"),
+) -> None:
+    """Compare two profiles: schema drift, cardinality jumps, new nulls — with k-suppressed deltas."""
+    from .diffing import diff_profiles, render_diff_markdown
+
+    result = diff_profiles(json.loads(old.read_text()), json.loads(new.read_text()))
+    if out is not None:
+        out.write_text(json.dumps(result, indent=2) + "\n")
+        typer.echo(f"wrote {out}")
+    markdown = render_diff_markdown(result)
+    if report is not None:
+        report.write_text(markdown)
+        typer.echo(f"wrote {report}")
+    else:
+        typer.echo(markdown)
+    changed = bool(result["tables"] or result["tables_added"] or result["tables_removed"])
+    if fail_on_change and changed:
+        raise typer.Exit(2)
+
+
+@app.command()
 def version() -> None:
     """Print the silueta version."""
     typer.echo(__version__)
