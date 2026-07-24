@@ -1,0 +1,53 @@
+[project]
+name = "silueta"
+version = "0.0.1"
+description = "Profile the shape of your data — never the values. A privacy-preserving data profiler so agents can model datasets they are never allowed to read."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Sergio Sánchez Zavala" }]
+requires-python = ">=3.10"
+keywords = ["data-profiling", "privacy", "pii", "phi", "dbt", "snowflake", "llm", "agents"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Database",
+    "Topic :: Security",
+]
+dependencies = [
+    "duckdb>=1.0",
+    "typer>=0.12",
+]
+
+[project.urls]
+Repository = "https://github.com/chekos/silueta"
+
+[project.scripts]
+silueta = "silueta.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/silueta"]
+
+[tool.ruff]
+line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# typer's API is call-in-default by design
+"src/silueta/cli.py" = ["B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
