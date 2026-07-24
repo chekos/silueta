@@ -6,30 +6,13 @@ work on generated NPI/DEA/SSN/ICD values and on identifiers sniffed as ints.
 
 from __future__ import annotations
 
-import csv
 import json
 from pathlib import Path
 
-import pytest
-
+from conftest import make_dea, make_npi
 from silueta.profiler import profile_paths
 from silueta.report import render_markdown
-from silueta.semantic import is_dea, is_npi, luhn_valid
-
-
-def make_npi(seed: int) -> str:
-    """Generate a checksum-valid NPI from a 9-digit seed."""
-    base = f"{100000000 + seed}"[:9]
-    for check in range(10):
-        if luhn_valid("80840" + base + str(check)):
-            return base + str(check)
-    raise AssertionError("unreachable")
-
-
-def make_dea(seed: int) -> str:
-    digits = [int(ch) for ch in f"{1000000 + seed}"[:6]]
-    check = ((digits[0] + digits[2] + digits[4]) + 2 * (digits[1] + digits[3] + digits[5])) % 10
-    return "BQ" + "".join(map(str, digits)) + str(check)
+from silueta.semantic import is_dea, is_npi
 
 
 def test_generators_are_valid():
@@ -37,26 +20,6 @@ def test_generators_are_valid():
     assert all(is_dea(make_dea(i)) for i in range(50))
 
 
-@pytest.fixture()
-def phi_csv(tmp_path: Path) -> Path:
-    path = tmp_path / "encounters.csv"
-    icd_codes = ["E11.9", "I10", "J45.909", "M54.5", "F32.9", "K21.0"]
-    with path.open("w", newline="") as fh:
-        w = csv.writer(fh)
-        w.writerow(["mrn", "provider_npi", "dea_number", "dx_code", "dob", "zip", "seen_on"])
-        for i in range(40):
-            w.writerow(
-                [
-                    f"MR{800000 + i}",
-                    make_npi(i * 7),
-                    make_dea(i * 3),
-                    icd_codes[i % len(icd_codes)],
-                    f"19{50 + (i % 40):02d}-06-15",
-                    f"{2010 + i % 60:04d}",  # 4-digit zips: leading zero lost upstream
-                    f"11/{(i % 28) + 1}/2025",
-                ]
-            )
-    return path
 
 
 def _cols(profile: dict) -> dict[str, dict]:
