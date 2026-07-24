@@ -18,6 +18,14 @@ def render_markdown(profile: dict[str, Any]) -> str:
     for table in profile["tables"]:
         lines.append(f"## {table['name']} ({table['source']}) — {table['rows']:,} rows")
         lines.append("")
+        if table.get("not_tabular"):
+            lines.append("*Not tabular: no usable table region found — skipped.*")
+            lines.append("")
+            continue
+        if table.get("recovery"):
+            notes = ", ".join(f"{key}={value}" for key, value in table["recovery"].items())
+            lines.append(f"*Recovery: {notes}*")
+            lines.append("")
         if table.get("suppressed_small_table"):
             lines.append("*Structure only: table has fewer than k rows.*")
             lines.append("")

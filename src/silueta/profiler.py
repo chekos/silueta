@@ -49,24 +49,108 @@ def _reader_sql(path: Path) -> str:
         return f"read_csv_auto('{literal}')"
     if suffix == ".parquet":
         return f"read_parquet('{literal}')"
-    if suffix in (".xlsx", ".xls"):
-        raise NotImplementedError(
-            "Excel support (with messy-workbook header/type recovery) is the v0.1 "
-            "headline and lands next — see the repo issues. CSV and Parquet work today."
-        )
     raise ValueError(f"Unsupported input type: {path.name}")
+
+
+PROMOTION_THRESHOLD = 0.98
+
+
+def _recover_types(
+    conn: duckdb.DuckDBPyConnection, source: str
+) -> tuple[str, dict[str, dict[str, Any]]]:
+    """Promote all-VARCHAR columns to real types via TRY_CAST when nearly all
+    non-null values cast cleanly. Returns SQL for a typed view over `source`
+    and per-column recovery facts ({to, confidence})."""
+    columns = [row[0] for row in conn.execute(f'DESCRIBE "{source}"').fetchall()]
+    selects: list[str] = []
+    recovered: dict[str, dict[str, Any]] = {}
+    for name in columns:
+        q = _q(name)
+        nonnull, as_int, as_num, as_date, as_ts = conn.execute(
+            f"SELECT count({q}), "
+            f"sum(CASE WHEN TRY_CAST({q} AS BIGINT) IS NOT NULL THEN 1 ELSE 0 END), "
+            f"sum(CASE WHEN TRY_CAST(replace({q}, ',', '') AS DOUBLE) IS NOT NULL THEN 1 ELSE 0 END), "
+            f"sum(CASE WHEN TRY_CAST({q} AS DATE) IS NOT NULL THEN 1 ELSE 0 END), "
+            f"sum(CASE WHEN TRY_CAST({q} AS TIMESTAMP) IS NOT NULL THEN 1 ELSE 0 END) "
+            f'FROM "{source}" WHERE {q} IS NOT NULL'
+        ).fetchone()
+        target: str | None = None
+        rate = 0.0
+        if nonnull:
+            rates = {
+                "BIGINT": (as_int or 0) / nonnull,
+                "DOUBLE": (as_num or 0) / nonnull,
+                "DATE": (as_date or 0) / nonnull,
+                "TIMESTAMP": (as_ts or 0) / nonnull,
+            }
+            for candidate in ("BIGINT", "DATE", "TIMESTAMP", "DOUBLE"):
+                if rates[candidate] >= PROMOTION_THRESHOLD:
+                    target, rate = candidate, rates[candidate]
+                    break
+        if target == "DOUBLE":
+            selects.append(f"TRY_CAST(replace({q}, ',', '') AS DOUBLE) AS {q}")
+            recovered[name] = {"to": target, "confidence": round(rate, 4)}
+        elif target:
+            selects.append(f"TRY_CAST({q} AS {target}) AS {q}")
+            recovered[name] = {"to": target, "confidence": round(rate, 4)}
+        else:
+            selects.append(q)
+    return f'SELECT {", ".join(selects)} FROM "{source}"', recovered
 
 
 def profile_table(
     conn: duckdb.DuckDBPyConnection, path: Path, k: int = DEFAULT_K
 ) -> dict[str, Any]:
     conn.execute(f"CREATE OR REPLACE TEMP VIEW t AS SELECT * FROM {_reader_sql(path)}")
+    return _profile_view(conn, name=path.stem, source=path.name, k=k)
+
+
+def profile_workbook(
+    conn: duckdb.DuckDBPyConnection, path: Path, k: int = DEFAULT_K
+) -> list[dict[str, Any]]:
+    """Profile every sheet of a workbook via messy-table recovery."""
+    from .workbook import extract_tables, register_table
+
+    tables: list[dict[str, Any]] = []
+    for i, sheet in enumerate(extract_tables(path)):
+        name = f"{path.stem}/{sheet.sheet_name}"
+        if sheet.not_tabular:
+            tables.append(
+                {
+                    "name": name,
+                    "source": path.name,
+                    "rows": 0,
+                    "columns": [],
+                    "not_tabular": True,
+                    "alerts": [{"kind": "not_tabular", "detail": sheet.recovery.get("reason", "")}],
+                }
+            )
+            continue
+        raw = f"_silueta_sheet_{i}"
+        register_table(conn, sheet, raw)
+        typed_sql, recovered = _recover_types(conn, raw)
+        conn.execute(f"CREATE OR REPLACE TEMP VIEW t AS {typed_sql}")
+        table = _profile_view(conn, name=name, source=path.name, k=k)
+        if sheet.recovery:
+            table["recovery"] = sheet.recovery
+        for col in table["columns"]:
+            if col["name"] in recovered:
+                col["type_recovered"] = recovered[col["name"]]
+                if "typed_as_text_numeric" not in col.get("alerts", []):
+                    col.setdefault("alerts", []).append("recovered_from_text")
+        tables.append(table)
+    return tables
+
+
+def _profile_view(
+    conn: duckdb.DuckDBPyConnection, name: str, source: str, k: int
+) -> dict[str, Any]:
     columns = conn.execute("DESCRIBE t").fetchall()
     row_count = conn.execute("SELECT count(*) FROM t").fetchone()[0]
 
     table: dict[str, Any] = {
-        "name": path.stem,
-        "source": path.name,
+        "name": name,
+        "source": source,
         "rows": row_count,
         "columns": [],
         "alerts": [],
@@ -240,6 +324,11 @@ def profile_paths(paths: list[Path], k: int = DEFAULT_K) -> dict[str, Any]:
             "k": k,
             "contract": CONTRACT_STATEMENT,
         },
-        "tables": [profile_table(conn, path, k) for path in paths],
+        "tables": [],
     }
+    for path in paths:
+        if path.suffix.lower() in (".xlsx", ".xls"):
+            profile["tables"].extend(profile_workbook(conn, path, k))
+        else:
+            profile["tables"].append(profile_table(conn, path, k))
     return profile

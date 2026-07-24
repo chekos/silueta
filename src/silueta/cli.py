@@ -17,7 +17,7 @@ app = typer.Typer(help="Profile the shape of your data — never the values.", n
 
 @app.command()
 def scan(
-    paths: list[Path] = typer.Argument(..., exists=True, readable=True, help="CSV/Parquet files to profile"),
+    paths: list[Path] = typer.Argument(..., exists=True, readable=True, help="CSV/Parquet/XLSX files to profile"),
     out: Path = typer.Option(Path("profile.json"), "--out", "-o", help="Where to write profile.json"),
     report: Path | None = typer.Option(None, "--report", "-r", help="Also write a Markdown report"),
     k: int = typer.Option(

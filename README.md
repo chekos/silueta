@@ -36,7 +36,7 @@ This contract is enforced by [tests](tests/test_contract.py) that scan every out
 
 ## Status
 
-Early alpha — CSV and Parquet profiling work today. On deck (see issues): messy-Excel header/type recovery (the headline feature), cross-table foreign-key candidates via exact containment, dbt/Snowflake scaffold emitters, database connections.
+Early alpha — CSV, Parquet, and multi-sheet Excel profiling work today, including messy-workbook recovery: title/footer rows skipped, multi-row headers merged, numbers-stored-as-text promoted to real types with confidence scores, non-tabular sheets flagged and skipped. On deck (see issues): cross-table foreign-key candidates, dbt/Snowflake scaffold emitters, database connections.
 
 ## Install
 
